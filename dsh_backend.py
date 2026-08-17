@@ -11,9 +11,10 @@ Node 写的，只能起子进程——不像 Claude Agent SDK 有 Python 绑定�
 * **没有工具/轮数开关。**任务类型（``tasks.py``）在这里只能通过**改写提问**来体现，
   没法像 Claude 侧那样按类型换工具集和轮数预算。
 
-配置走 ``$DSH_HOME``：``settings.yaml`` 定义 provider，``cordis.patch.yml`` 定默认模型。
-这里在运行时生成它们，指向 OpenRouter——官方 provider 要 ``DEEPSEEK_API_KEY``，
-而这个项目只有 OpenRouter 的 key，走网关能省掉再开一个账号。
+配置走 ``$DSH_HOME``：``settings.yaml`` 定义 provider，``cordis.patch.yml`` 定默认模型，
+运行时生成。有 ``DEEPSEEK_API_KEY`` 就走**官方 provider**（``deepseek-official``），
+那是这套 harness 的原生路径；没有则退回 OpenRouter 网关，代价是模型名要写成
+``deepseek/deepseek-v4-flash`` 这种带前缀的形式。
 
 权限用 ``DSH_PERMISSION_MODE=read-only``。注意它的审批策略是**除了
 ``danger-full-access`` 都要 ask**，headless 下没人可问，所以只读模式下模型碰到写操作
@@ -38,27 +39,34 @@ TIMEOUT = float(os.getenv("DSH_TIMEOUT", "300"))
 def _write_config(model: str, base_url: str) -> None:
     """生成 dsh 的配置。
 
-    ``settings.yaml`` 定 provider（指到 OpenRouter，复用现有的 key），
-    ``cordis.patch.yml`` 把默认模型换成我们要测的那个。每次运行都重写，
-    免得改了模型却用着上次的配置。
+    有官方 key 就用官方 provider——它是 harness 自带的，模型名用裸名
+    （``deepseek-v4-flash``）。没有才退回自定义 provider 指向网关，那时模型名要带
+    厂商前缀。每次运行都重写，免得改了模型却用着上次的配置。
     """
     DSH_HOME.mkdir(parents=True, exist_ok=True)
-    (DSH_HOME / "settings.yaml").write_text(
-        "llm-pi-ai:\n"
-        "  providers:\n"
-        "    openrouter:\n"
-        "      name: OpenRouter\n"
-        "      apiKeyEnv: OPENROUTER_API_KEY\n"
-        "      api: openai-completions\n"
-        f"      baseURL: {base_url}\n"
-        "      models:\n"
-        f"        - id: {model}\n",
-        encoding="utf-8",
-    )
+    official = bool(os.getenv("DEEPSEEK_API_KEY"))
+    if official:
+        # 官方 provider 已在 harness 的 catalog 里，只要有 key 就能用，不必自定义。
+        (DSH_HOME / "settings.yaml").write_text("{}\n", encoding="utf-8")
+        provider = "deepseek-official"
+    else:
+        (DSH_HOME / "settings.yaml").write_text(
+            "llm-pi-ai:\n"
+            "  providers:\n"
+            "    openrouter:\n"
+            "      name: OpenRouter\n"
+            "      apiKeyEnv: OPENROUTER_API_KEY\n"
+            "      api: openai-completions\n"
+            f"      baseURL: {base_url}\n"
+            "      models:\n"
+            f"        - id: {model}\n",
+            encoding="utf-8",
+        )
+        provider = "openrouter"
     (DSH_HOME / "cordis.patch.yml").write_text(
         "- id: agent-default-model\n"
         "  config:\n"
-        "    provider: openrouter\n"
+        f"    provider: {provider}\n"
         f"    model: {model}\n",
         encoding="utf-8",
     )
@@ -70,7 +78,7 @@ class DshBackend:
     def __init__(
         self,
         root: Path,
-        model: str = "deepseek/deepseek-v4-flash",
+        model: str = "deepseek-v4-flash",
         base_url: str = "https://openrouter.ai/api/v1",
     ):
         """初始化。
