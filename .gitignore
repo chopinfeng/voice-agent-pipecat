@@ -1,0 +1,12 @@
+.env
+piper-voices/
+*.wav
+
+logs/
+
+# 测试语料要留着，但**不进版本库**——里面是真人录音。
+# 这些是标阈值的唯一可靠依据（合成音频反复给出过错误结论），本机保留、换机重录。
+testdata/
+memory_store.jsonl
+pipecat/
+speaker_profile.npz
