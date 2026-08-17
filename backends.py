@@ -466,7 +466,7 @@ def build(kind: str, *, client, model: str, root: Path) -> Backend:
     Anthropic 鉴权，也不另开一笔账。要连官方就把 ``CLAUDE_BASE_URL`` 设成空串。
 
     Args:
-        kind: ``builtin`` 或 ``claude``。
+        kind: ``builtin`` / ``claude`` / ``dsh``。
         client: AsyncOpenAI 兼容客户端，自带循环用。
         model: 自带循环用的模型。
         root: 项目根目录。
@@ -474,6 +474,13 @@ def build(kind: str, *, client, model: str, root: Path) -> Backend:
     Returns:
         后端实例。
     """
+    if kind == "dsh":
+        from dsh_backend import DshBackend
+
+        model = os.getenv("DSH_MODEL", "deepseek/deepseek-v4-flash")
+        logger.info(f"agent 后端：DeepSeek Harness（{model}）")
+        return DshBackend(root, model=model)
+
     if kind == "claude":
         try:
             base_url = os.getenv("CLAUDE_BASE_URL", GATEWAY)
