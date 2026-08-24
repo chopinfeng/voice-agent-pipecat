@@ -48,7 +48,9 @@ import voice_bot as V  # noqa: E402 - 要先加载 .env；工具定义从这里�
 IN_WAV = HERE / "zh_test_input.wav"
 MODEL_DIR = HERE / "piper-voices"
 LOG = HERE / "logs" / "realtime.jsonl"
-LLM_MODEL = os.getenv("OPENROUTER_MODEL", "deepseek/deepseek-v4-flash")
+# 直接用 voice_bot 的值，别在这儿另留一份默认——两边默认值不一致时，
+# 量出来的是一个线上没人见过的配置（SPEECH_TIMEOUT 就这么坑过一次）。
+LLM_MODEL = os.getenv("OPENROUTER_MODEL", V.LLM_MODEL)
 TTS_VOICE = os.getenv("PIPER_VOICE", "zh_CN-huayan-medium")
 # 默认值跟 voice_bot.py 保持一致——这个脚本要测的是真正在跑的配置，
 # 各留一套默认值只会量出一个上线之后没人见过的数。

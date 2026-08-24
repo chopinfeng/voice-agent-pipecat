@@ -41,12 +41,13 @@ SYSTEM = (
 )
 PROMPT = "帮我看一下这个项目的延迟主要花在哪儿了。"
 
-CANDIDATES = [
-    "deepseek/deepseek-v4-flash",
-    "google/gemini-2.5-flash-lite",
-    "openai/gpt-4.1-nano",
-    "z-ai/glm-4.6",
-]
+# 只用中国开源模型：这个 key 上 Anthropic / Google / OpenAI 全返回 403
+# 「违反 provider 服务条款」，而且用户明确要求只用国产开源。
+CANDIDATES = os.getenv(
+    "CANDIDATES",
+    "deepseek/deepseek-v4-flash,z-ai/glm-4.6,qwen/qwen3-max,"
+    "minimax/minimax-m2.7,inclusionai/ling-3.0-flash,moonshotai/kimi-k2.5",
+).split(",")
 
 # 语音侧挂的工具，只取名字和形状，用来量 schema 对首 token 的影响。
 TOOLS = [
@@ -82,7 +83,7 @@ async def ttfb(client, model: str, tools: list | None) -> float:
         ],
         tools=tools or None,
         stream=True,
-        max_tokens=80,
+        max_tokens=int(os.getenv('MAX_TOKENS', '400')),
     )
     async for chunk in stream:
         if not chunk.choices:
@@ -94,35 +95,40 @@ async def ttfb(client, model: str, tools: list | None) -> float:
     return float("nan")
 
 
-async def measure(client, model: str, tools: list | None) -> tuple[float, float]:
-    """跑一轮冷启动加 ROUNDS 轮热连接，返回 (冷启动, 热连接中位)。"""
+async def measure(client, model: str, tools: list | None) -> tuple[float, float, float]:
+    """跑一轮冷启动加 ROUNDS 轮热连接。
+
+    Returns:
+        (冷启动, 热连接中位, 热连接最大值)。**最大值必须报**——语音链路上决定体验的
+        是尾巴不是中位数：上一轮选型时 deepseek 的中位只比对手慢 0.4 秒，p95 却是
+        12 秒，隔几轮就卡一次，光看中位会选错。
+    """
     try:
         cold = await ttfb(client, model, tools)
         warm = [await ttfb(client, model, tools) for _ in range(ROUNDS)]
     except Exception as e:  # noqa: BLE001 - 一个模型挂了不该中断整轮对比
         print(f"  {model} 失败：{type(e).__name__} {e}")
-        return float("nan"), float("nan")
-    return cold, statistics.median(warm)
+        return float("nan"), float("nan"), float("nan")
+    return cold, statistics.median(warm), max(warm)
 
 
 async def main():
     key = os.environ["OPENROUTER_API_KEY"]
     print(f"\n首 token 延迟，每个模型 {ROUNDS} 次热连接取中位\n")
-    print(f"{'模型':<32}{'冷启动':>8}{'无工具':>8}{'带工具':>8}{'工具代价':>10}")
+    print(f"{'模型':<30}{'冷启动':>8}{'无工具':>8}{'带工具':>8}{'带工具最慢':>11}")
 
     for model in CANDIDATES:
         # 每个模型一个新客户端，保证冷启动那次是真的冷。
         client = AsyncOpenAI(api_key=key, base_url="https://openrouter.ai/api/v1")
-        cold, bare = await measure(client, model, None)
-        _, withtools = await measure(client, model, TOOLS)
+        cold, bare, _ = await measure(client, model, None)
+        _, withtools, worst = await measure(client, model, TOOLS)
         if math.isnan(bare):
             # 推理型模型（glm-4.6 这类）在 max_tokens 用完之前可能只吐 reasoning，
             # 一个正文 token 都没有。这种本来也不适合走对话链路。
             print(f"{model:<32}    没等到正文 token，不适合对话链路")
             continue
         print(
-            f"{model:<32}{cold:7.2f}s{bare:7.2f}s{withtools:7.2f}s"
-            f"{withtools - bare:+9.2f}s"
+            f"{model:<30}{cold:7.2f}s{bare:7.2f}s{withtools:7.2f}s{worst:10.2f}s"
         )
 
 

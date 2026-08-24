@@ -42,14 +42,14 @@ LINEUP = os.getenv(
 REPEAT = int(os.getenv("REPEAT", "1"))
 
 # OpenRouter 价目（美元每百万 token），用来把 token 折成每问成本。
+# 只列国产开源的价目——Anthropic / Google / OpenAI 在当前 key 上是 403。
 PRICES = {
     "z-ai/glm-4.6": (0.50, 2.00, 0.10),
-    "anthropic/claude-haiku-4.5": (1.00, 5.00, 0.10),
-    "anthropic/claude-sonnet-4.5": (3.00, 15.00, 0.30),
-    "deepseek/deepseek-v4-flash": (0.14, 0.28, 0.028),
-    "openai/gpt-5.1": (1.25, 10.00, 0.125),
-    "moonshotai/kimi-k2-thinking": (0.60, 2.50, 0.15),
+    "deepseek/deepseek-v4-flash": (0.06, 0.11, 0.012),
+    "deepseek/deepseek-v4-pro": (0.53, 1.05, 0.106),
     "qwen/qwen3-max": (0.78, 3.90, 0.156),
+    "moonshotai/kimi-k2.5": (0.45, 2.25, 0.09),
+    "minimax/minimax-m2.7": (0.24, 0.96, 0.048),
 }
 
 # 只跑有判据的题——没有判据的题看不出高下，白花钱。

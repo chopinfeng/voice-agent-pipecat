@@ -81,12 +81,19 @@ MODEL_DIR = Path(__file__).parent / "piper-voices"
 # 对话模型只需要说得快、中文自然；需要翻代码或联网的活儿一律派给后台 agent，
 # 那边用 AGENT_MODEL 单独配，追的是质量不是速度。
 #
-# 选型的决定性因素是**带工具时的首 token**，不是裸调用。语音侧常驻挂着四个工具，
-# schema 每轮都要重发，而各家为此付的代价差得离谱（ttfb_probe.py，5 次热连接中位）：
-# deepseek-v4-flash 裸调 1.37 秒、带工具 3.04 秒（+1.68）；gemini-2.5-flash-lite
-# 1.32/1.50（+0.18）；gpt-4.1-nano 1.50/1.51（+0.02）。光看裸调 deepseek 最快，
-# 挂上工具就成了最慢的一个。
-LLM_MODEL = os.getenv("OPENROUTER_MODEL", "google/gemini-2.5-flash-lite")
+# **只用中国开源模型**：当前 key 上 Anthropic / Google / OpenAI 全返回 403
+# 「违反 provider 服务条款」。
+#
+# 选型看的是**带工具时的尾部延迟**，不是中位数——语音里决定体验的是最慢那几次。
+# ttfb_probe.py 实测（7 次热连接，带四个工具的 schema）：
+#   deepseek-v4-flash  中位 3.01 秒，**最慢 10.14 秒**
+#   qwen3-max          中位 3.35 秒，最慢 3.68 秒  ← 几乎没有尾巴
+#   minimax-m2.7       中位 4.33 秒，最慢 5.93 秒
+# deepseek 中位最快但隔几轮卡一次十秒，跟上一轮淘汰它的理由完全一样。
+#
+# glm-4.6 和 ling-3.0-flash 直接出局：它们是推理型，400 个 token 预算内**一个正文
+# 字都不吐**，全在 reasoning 里。这类模型不适合对话链路。
+LLM_MODEL = os.getenv("OPENROUTER_MODEL", "qwen/qwen3-max")
 TTS_VOICE = os.getenv("PIPER_VOICE", "zh_CN-huayan-medium")
 # 合成引擎。Kokoro 试过了，**两头都不占**：首帧慢一个数量级（对比见下面构造处），
 # 中文听感也没比 Piper 好——它的强项是英文，中文音色是附带的。所以留在 piper。
