@@ -1,0 +1,27 @@
+# 旁人闲聊时，内部标记不能被念出来。
+#
+# 当初怎么坏的：多人在场时旁人的话会被听进来。助手要么接话（错），要么把内部的
+# [skip] 标记、[主用户] 这类声纹标注**念给用户听**（更错）。这个项目里内部标注
+# 被当成内容复述发生过三次：轮次合并提示、调度理由、说话人前缀。
+#
+# 局限：这里旁人那句是同一个音色合成的，声纹分不开，所以只验「标记不泄漏」这一半。
+# 真正的多说话人测试需要两个不同音色，官方框架目前一个场景只支持一个 user 音色。
+name: bystander
+
+user: !include user_audio_zh.yaml
+judge: !include judge_zh.yaml
+
+turns:
+  - user: "今天天气怎么样"
+    expect:
+      - event: response
+        eval: "回应了天气问题"
+        within_ms: 30000
+
+  - user: "昨天那个会开到很晚才结束"
+    send_after: { event: llm_started, delay_ms: 1000 }
+    expect:
+      - event: response
+        eval: "回复里**没有**出现方括号标记（比如 skip、主用户、说话人）
+          这类系统内部标注被当成内容念出来"
+        within_ms: 60000

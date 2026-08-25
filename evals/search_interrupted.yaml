@@ -1,0 +1,30 @@
+# 联网结果必须送达，哪怕中途被打断。
+#
+# 当初怎么坏的：联网要五到十秒，这期间助手一声不吭，用户等两秒就再问一遍，
+# 而再问就是一次打断——打断取消了「结果回来后念出来」的那轮 LLM，于是七次查询
+# 有四次查到了结果却一句没念。修复见 voice_bot._deliver：结果直接说出口，
+# 不依赖任何一轮 LLM 存活。
+name: search_interrupted
+
+user: !include user_audio_zh.yaml
+judge: !include judge_zh.yaml
+
+turns:
+  - user: "帮我查一下后天上海的气温"
+    expect:
+      # 发起查询时必须先出声，这是打断循环的源头——不出声用户就会重复问。
+      - event: response
+        eval: "说了它正在查，或者说了要查什么"
+        within_ms: 20000
+
+  - user: "你能听到我说话吗"
+    send_after: { event: llm_started, delay_ms: 1000 }
+    expect:
+      - event: response
+        eval: "回应了「能不能听到」这个问题"
+
+  # 打断之后结果仍然要送到。这条是整个场景的靶心。
+  - expect:
+      - event: response
+        eval: "报出了上海的气温或天气情况"
+        within_ms: 60000

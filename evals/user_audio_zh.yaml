@@ -1,0 +1,13 @@
+# 用户台词怎么变成声音。所有场景共用。
+#
+# 走 audio 而不是默认的 text：文本模式跳过听写，测不出 STT 听岔——而这个项目被
+# 听岔坑过好几次（「填充语」听成「春雨」、「上一级目录」听成「商议及目录」，
+# 整个场景因此作废）。真语音慢一些，但测的是真链路。
+#
+# 音色必须跟语言配套：kokoro 的 af_heart 是美音，语言设成 zh 也念不出中文。
+modality: audio
+speech:
+  service: kokoro
+  voice: zf_xiaoxiao
+  language: zh
+  sample_rate: 16000

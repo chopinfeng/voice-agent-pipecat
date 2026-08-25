@@ -1,0 +1,23 @@
+# 用户问「有什么在跑」时，联网查询也要算在内。
+#
+# 当初怎么坏的：只有 agent 任务登记进任务表，联网查询一次都没登记（实测调用数 0）。
+# 用户问「现在有什么在跑」会被答「没有」，而当时其实有个搜索正在飞。
+# 修复见 progress_api 的 kind 字段：搜索和 agent 任务进同一张表。
+name: task_visible
+
+user: !include user_audio_zh.yaml
+judge: !include judge_zh.yaml
+
+turns:
+  - user: "帮我查一下北京下周有什么演唱会"
+    expect:
+      - event: response
+        eval: "说了它正在查"
+        within_ms: 20000
+
+  # 要等查询**真的发起**之后再问，否则答「没有任务」是对的。
+  - user: "你现在有什么任务在跑"
+    send_after: { event: llm_started, delay_ms: 1000 }
+    expect:
+      - event: response
+        eval: "说出了正在进行的查询（演唱会相关），**没有**说「没有在跑的任务」"
