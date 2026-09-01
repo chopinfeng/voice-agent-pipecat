@@ -10,3 +10,5 @@ testdata/
 memory_store.jsonl
 pipecat/
 speaker_profile.npz
+__pycache__/
+*.pyc
