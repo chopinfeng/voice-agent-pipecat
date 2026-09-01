@@ -85,6 +85,13 @@ class ProjectAgentWorker(BaseWorker):
         self._backend = backends.build(
             backend, client=self._client, model=model, root=self._root
         )
+        # 自己记一份 job_id -> 处理协程，用来做抢占。
+        #
+        # 原先这里读的是 ``BaseWorker._job_handler_tasks``——**私有属性**，而且是这个
+        # 项目里唯一一处伸手进 pipecat 内部的地方。``active_jobs`` 和 ``job_groups``
+        # 上游都开了公开 property，唯独处理协程没有，所以没法换成公开接口，只能自己记。
+        # 自己记的另一个好处是这份表只含 ``ask``，抢占不会误伤将来加的别种 job。
+        self._handler_tasks: dict[str, asyncio.Task] = {}
 
     @job(name="ask")
     async def on_ask(self, message: BusJobRequestMessage) -> None:
@@ -94,6 +101,7 @@ class ProjectAgentWorker(BaseWorker):
         logger.info(f"Worker '{self.name}': 收到问题「{question}」")
         progress_api.start(message.job_id, question)
         handle = self._sched.register(message.job_id, question)
+        self._handler_tasks[message.job_id] = asyncio.current_task()
         try:
             if not await self._admit(handle):
                 progress_api.finish(message.job_id, state="cancelled")
@@ -116,6 +124,7 @@ class ProjectAgentWorker(BaseWorker):
                 message.job_id, {"error": str(e)}, status=JobStatus.ERROR
             )
         finally:
+            self._handler_tasks.pop(message.job_id, None)
             self._sched.release(handle)
             self._sched.forget(message.job_id)
             # 名额空出来了，把挂起最久的那个放回来。
@@ -165,8 +174,8 @@ class ProjectAgentWorker(BaseWorker):
 
     async def cancel_running(self, job_id: str) -> None:
         """抢占：把某个在跑的任务取消掉。"""
-        task = self._job_handler_tasks.get(job_id)
-        if task:
+        task = self._handler_tasks.get(job_id)
+        if task and not task.done():
             task.cancel()
 
     async def on_job_update_requested(

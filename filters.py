@@ -18,6 +18,7 @@ from pipecat.frames.frames import (
     LLMContextFrame,
     LLMTextFrame,
     TranscriptionFrame,
+    UserStoppedSpeakingFrame,
 )
 from pipecat.processors.aggregators.llm_response_universal import LLMAssistantAggregator
 from pipecat.processors.frame_processor import FrameDirection, FrameProcessor
@@ -247,3 +248,69 @@ class RememberInterrupted(LLMAssistantAggregator):
             logger.debug(f"{self}: 被打断，先记下已说出口的部分")
             await self.push_aggregation()
         await super()._handle_interruptions(frame)
+
+    # ---- 异步工具结果：用户说话时那一轮推理的补跑 ----
+    #
+    # 上游 ``_handle_function_call_result`` 结尾是：
+    #
+    #     if run_llm and not self._user_speaking:
+    #         await self._maybe_push_context_after_function_result()
+    #
+    # 结果本身**不会丢**——``_handle_function_call_finished`` 已经无条件把它作为
+    # 一条 developer 消息写进上下文了（``async_tool_messages`` 那套协议）。丢的是
+    # **主动出声的那一次推理**：结果静静躺在上下文里，要等用户下一次开口才被读到。
+    #
+    # 而这里上游是不对称的：bot 在说话时它设 ``_push_context_on_bot_stopped_speaking``
+    # 并在 ``BotStoppedSpeakingFrame`` 补跑；用户在说话时**什么标记都不留**，
+    # ``UserStoppedSpeakingFrame`` 只把 ``_user_speaking`` 置回 False 就完了。
+    #
+    # 补上对称的那一半。这是「后台任务办完了，结果自己会说出来」的正路——
+    # 不需要绕过 ``result_callback`` 直接推 TTS（见 voice_bot._deliver）。
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._push_context_on_user_stopped_speaking = False
+
+    async def _handle_function_call_result(self, frame):
+        """结果落地时用户正在说话的话，记一笔，等他说完再补那一轮推理。"""
+        was_user_speaking = self._user_speaking
+        await super()._handle_function_call_result(frame)
+        if was_user_speaking and frame.result and self._result_wants_llm(frame):
+            logger.debug(f"{self}: 用户在说话，工具结果的推理推迟到他说完")
+            self._push_context_on_user_stopped_speaking = True
+
+    @staticmethod
+    def _result_wants_llm(frame) -> bool:
+        """复现上游对 ``run_llm`` 的判断，但只看显式声明的那两级。
+
+        上游还有一条「同组里最后一个结果才跑」的规则，这里不复制——同组并发的
+        工具调用在这个 bot 里不会出现（工具都是一次派一个），复制过来只会让两边
+        的逻辑各自漂移。真出现了，最坏结果是多跑一轮推理，不是丢结果。
+        """
+        props = getattr(frame, "properties", None)
+        if props is not None and getattr(props, "run_llm", None) is not None:
+            return bool(props.run_llm)
+        if getattr(frame, "run_llm", None) is not None:
+            return bool(frame.run_llm)
+        return True
+
+    async def process_frame(self, frame, direction):
+        await super().process_frame(frame, direction)
+        if (
+            isinstance(frame, UserStoppedSpeakingFrame)
+            and self._push_context_on_user_stopped_speaking
+        ):
+            self._push_context_on_user_stopped_speaking = False
+            logger.debug(f"{self}: 用户说完了，补跑工具结果那一轮推理")
+            # 走上游那个方法而不是直接推帧：bot 这时可能正在说话，它会接着往
+            # ``_push_context_on_bot_stopped_speaking`` 上再推迟一次。
+            await self._maybe_push_context_after_function_result()
+
+    async def push_context_frame(self, direction: FrameDirection = FrameDirection.DOWNSTREAM):
+        """推过了就不用再补。跟上游清 bot 那个标记的位置对齐。"""
+        await super().push_context_frame(direction)
+        self._push_context_on_user_stopped_speaking = False
+
+    async def reset(self):
+        await super().reset()
+        self._push_context_on_user_stopped_speaking = False
