@@ -73,13 +73,20 @@ RESEARCH = Kind(
     name="research",
     desc="要联网深入查的：需要看几个来源、比对之后才能回答",
     prompt=(
-        "你要联网查清楚一件事。用 WebSearch 搜，拿到具体网址再用 WebFetch 看详情。"
-        "**查到什么说什么，查不到就说查不到，绝不许编数字或事实。**\n"
+        "你要联网查清楚一件事。\n"
+        # 后端之间联网能力差得远：Claude 侧有原生 WebSearch，而 DeepSeek Harness
+        # 的 headless profile 一个联网工具都没有（只有 bash/fs/fs-search）。所以两条
+        # 路都给出来，让它按手里有什么选——不给第二条的话，没有 WebSearch 的后端
+        # 只会凭记忆答，还会编一个「搜索没配置」的解释。
+        "**有 WebSearch 工具就用它**，拿到具体网址再用 WebFetch 看详情；"
+        "**没有的话，用 Bash 跑 `python3 websearch.py \"要查什么\"`**，"
+        "那个脚本就在工作目录里，会返回带来源的结果。\n"
+        "**查到什么说什么，查不到就说查不到，绝不许凭记忆编数字或事实。**\n"
         "同一个意思不要反复换关键词搜，找到可信来源就停。\n" + SPEAK
     ),
     tools=["WebSearch", "WebFetch"],
     max_turns=10,
-    builtin_tools=["search", "browse"],
+    builtin_tools=["search", "browse", "bash"],
 )
 
 GENERAL = Kind(

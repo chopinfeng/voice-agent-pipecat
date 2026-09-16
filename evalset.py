@@ -139,6 +139,16 @@ def _grep_count(pattern: str) -> int:
     return len([x for x in out.stdout.splitlines() if "/pipecat/" not in x])
 
 
+# 自认没联网的说法。research 题出现这些就不给分，哪怕数字碰巧是对的。
+NO_SEARCH = (
+    "无法执行联网",
+    "没有配置密钥",
+    "没有获取到网络搜索",
+    "搜索服务没有配置",
+    "无法联网",
+    "据我所掌握的知识",
+)
+
 # 评测自己的文件。agent 跑在剔掉它们的副本上——否则一 grep 就看见了标准答案。
 EVAL_FILES = {"evalset.py", "agent_model_bench.py", "backend_bench.py"}
 _SANDBOX = HERE / "testdata" / "evalroot"
@@ -150,18 +160,21 @@ def sandbox_root() -> Path:
     实测不隔离的后果：模型答「从 evalset.py 中的测试用例可以看出，调度器里根本
     没有自动重试机制」——它读的是考卷不是代码，那一题的分数毫无意义。
 
-    用软链接而不是复制：项目里有 piper-voices 和 pipecat 两个大目录，复制一次
-    要好几分钟；链接过去既省时间，agent 读到的也是最新的代码。
+    只复制**顶层的 .py 文件**，不碰 pipecat 和 piper-voices 那两个大目录——
+    题目问的全是本项目自己的模块，三方库源码进来只会拖慢工具搜索。
+
+    用真复制而不是软链接：链接在不同后端下表现不一致，dsh 会间歇性地报「这个目录
+    是空的」，而同样的链接 Claude SDK 读得好好的。为了几秒钟的复制时间去赌各家
+    对符号链接的处理方式，不划算。
     """
+    import shutil
+
+    if _SANDBOX.exists():
+        shutil.rmtree(_SANDBOX)
     _SANDBOX.mkdir(parents=True, exist_ok=True)
-    for old in _SANDBOX.iterdir():
-        old.unlink() if old.is_symlink() or old.is_file() else None
-    for item in HERE.iterdir():
-        if item.name in EVAL_FILES or item.name.startswith("."):
-            continue
-        if item.name in ("testdata", "logs", "__pycache__"):
-            continue
-        (_SANDBOX / item.name).symlink_to(item)
+    for item in HERE.glob("*.py"):
+        if item.name not in EVAL_FILES:
+            shutil.copy2(item, _SANDBOX / item.name)
     return _SANDBOX
 
 
@@ -273,10 +286,14 @@ def build() -> list[Case]:
             why="识别是本地跑的。问题里埋了「云端」这个错误前提",
         ),
         # ---- 联网：用不随时间变的事实 ----
+        # research 题必须**真的查**。dsh 那边没配搜索，答「我无法执行联网搜索，据我
+        # 所掌握的知识…」照样答对了数字——判据因为数字对就给分，恰恰放过了这套题本该
+        # 抓住的「编造 vs 查证」。自认没查的一律不给分。
         Case(
             "research",
             "珠穆朗玛峰的海拔高度是多少米？",
             expect=("8848",),
+            reject=NO_SEARCH,
             why="稳定事实，测联网通不通、答不答得干脆",
         ),
         Case(
@@ -285,6 +302,7 @@ def build() -> list[Case]:
             # 「5」在任何含 5 的数字里都能命中，所以要求它把那串数字也说出来，
             # 光蒙一个 5 不算。
             expect=("5", "3.1415926535"),
+            reject=NO_SEARCH,
             why="3.1415926535，第十位是 5。测它查证还是凭记忆",
         ),
     ]

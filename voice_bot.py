@@ -2,11 +2,17 @@
 
 只有 LLM 走云端，识别和合成都在本机，因此 OpenRouter 的 key 是唯一需要的凭据。
 
-端到端延迟（realtime_replay.py 实测 4 轮中位，用户说完到听到声音）1.05 秒：
-    听写  FunASR SenseVoiceSmall      0.78s（与停顿窗口并行）
-    LLM   deepseek-v4-flash 首 token  1.47s
-    TTS   Piper zh_CN-huayan-medium   0.05s
-真实回答约 2.5 秒接上，中间那段由预合成的填充语垫着。
+端到端延迟（realtime_replay.py 实测 5 轮中位，真 VAD、挂着全套工具）：
+    VAD 判定说完                          0.5s（从真的说完算起）
+    听写  FunASR SenseVoiceSmall          0.73s
+    轮次判定（与听写并行，已被吸收）           0.85s
+    LLM   qwen3-max 首 token              2.82s
+    回答开始合成                           4.43s
+用户说完到听见声音 1.10 秒——那是填充语顶上的，真正的回答在 4.4 秒左右接上。
+
+**测延迟前先确认机器是干净的。**残留的 voice_bot 进程会把这些数字放大几十倍
+（实测负载 44 时听写量出 68.9 秒、顺序都乱了）。清理用 ``pkill -f voice_bot.py``，
+别用按端口杀——没绑上端口的僵尸进程会漏网，而它们照样占着模型和内存。
 
 后台还挂了一个 agent worker：问到项目里的代码时，语音这边派单出去、继续说话，
 不阻塞对话；agent 在自己的循环里翻文件，查完了再念结果。设 AGENT=0 可以关掉。
@@ -81,12 +87,26 @@ MODEL_DIR = Path(__file__).parent / "piper-voices"
 # 对话模型只需要说得快、中文自然；需要翻代码或联网的活儿一律派给后台 agent，
 # 那边用 AGENT_MODEL 单独配，追的是质量不是速度。
 #
-# 选型的决定性因素是**带工具时的首 token**，不是裸调用。语音侧常驻挂着四个工具，
-# schema 每轮都要重发，而各家为此付的代价差得离谱（ttfb_probe.py，5 次热连接中位）：
-# deepseek-v4-flash 裸调 1.37 秒、带工具 3.04 秒（+1.68）；gemini-2.5-flash-lite
-# 1.32/1.50（+0.18）；gpt-4.1-nano 1.50/1.51（+0.02）。光看裸调 deepseek 最快，
-# 挂上工具就成了最慢的一个。
-LLM_MODEL = os.getenv("OPENROUTER_MODEL", "google/gemini-2.5-flash-lite")
+# **只用中国开源模型**：当前 key 上 Anthropic / Google / OpenAI 全返回 403
+# 「违反 provider 服务条款」。
+#
+# **选型要两步走，只看延迟会选错。**先量带工具的首 token 和尾巴筛掉慢的，
+# 再拿五个真实场景验工具协议对不对——快而不能用比慢更糟：
+#
+#   模型              带工具首token   工具协议
+#   qwen3-next-80b       1.93s      **把工具调用当正文吐出来**，那串 JSON 会被念给用户
+#   deepseek 官方直连     0.62s      协议对，但天气和记忆全派给 ask_project（选错工具）
+#   qwen3-30b            3.37s      同样泄漏 JSON
+#   qwen3-max            3.48s      五项全过  ← 唯一可用
+#
+# 光看延迟表会选 qwen3-next-80b，它快 1.5 秒但会让用户听到
+# `"arguments": {"query": ...}`。功能检查那一步是这次选型的决定性环节。
+#
+# glm-4.6 和 ling-3.0-flash 更早出局：推理型，400 个 token 预算内**一个正文字都不吐**。
+#
+# **瓶颈是网关不是模型**：同样的活儿直连 DeepSeek 官方只要 0.62 秒，走 OpenRouter
+# 要 2.8-3.6 秒。哪天找到「直连 + 工具选择正确」的组合，对话延迟能掉进一秒内。
+LLM_MODEL = os.getenv("OPENROUTER_MODEL", "qwen/qwen3-max")
 TTS_VOICE = os.getenv("PIPER_VOICE", "zh_CN-huayan-medium")
 # 合成引擎。Kokoro 试过了，**两头都不占**：首帧慢一个数量级（对比见下面构造处），
 # 中文听感也没比 Piper 好——它的强项是英文，中文音色是附带的。所以留在 piper。

@@ -518,7 +518,7 @@ def build(kind: str, *, client, model: str, root: Path) -> Backend:
     Anthropic 鉴权，也不另开一笔账。要连官方就把 ``CLAUDE_BASE_URL`` 设成空串。
 
     Args:
-        kind: ``builtin`` 或 ``claude``。
+        kind: ``builtin`` / ``claude`` / ``dsh``。
         client: AsyncOpenAI 兼容客户端，自带循环用。
         model: 自带循环用的模型。
         root: 项目根目录。
@@ -526,18 +526,26 @@ def build(kind: str, *, client, model: str, root: Path) -> Backend:
     Returns:
         后端实例。
     """
+    if kind == "dsh":
+        from dsh_backend import DshBackend
+
+        model = os.getenv("DSH_MODEL", "deepseek/deepseek-v4-flash")
+        logger.info(f"agent 后端：DeepSeek Harness（{model}）")
+        return DshBackend(root, model=model)
+
     if kind == "claude":
         try:
             base_url = os.getenv("CLAUDE_BASE_URL", GATEWAY)
             backend = ClaudeBackend(
                 root,
-                # 效果优先选的（agent_model_bench.py，5 道跨文件难题）：
-                # sonnet-4.5 答对 5/5、2.8 步、$0.095 每问；glm-4.6 4/5、3.4 步、$0.020；
-                # haiku-4.5 3/5、3.6 步、$0.041（比 glm 又差又贵，别用）。
-                # 差别不只在分数——问调度策略时 glm 答「队列缓冲、拒绝、降级」，是编的
-                # 通用术语；sonnet 真去读了 scheduler.py，四个动作一字不差。
-                # 这条路上慢一点贵一点都可以，答错不行。
-                model=os.getenv("CLAUDE_AGENT_MODEL", "anthropic/claude-sonnet-4.5"),
+                # 效果优先选的（agent_model_bench.py，14 道有判据的题，只用国产开源）：
+                # deepseek-v4-pro  14/14、2.5 步、$0.0153 每问  ← 满分且最便宜
+                # qwen3-max        12/14、3.0 步、$0.0856
+                # glm-4.6           9/13、2.4 步、$0.0206（compute 只有 2/5，
+                #                   它是推理型，倾向于推而不是真去算）
+                # 慢一倍换全对，这条路上划算——用户听到的是「我去查一下」，
+                # 几十秒之后才要结果。
+                model=os.getenv("CLAUDE_AGENT_MODEL", "deepseek/deepseek-v4-pro"),
                 base_url=base_url,
                 auth_token=os.getenv("CLAUDE_AUTH_TOKEN")
                 or os.getenv("OPENROUTER_API_KEY"),

@@ -1,0 +1,31 @@
+# 打断之后不能失忆、不能复读。
+#
+# 当初怎么坏的：pipecat 默认在打断时把助手说了一半的回复整个丢掉，上下文里于是
+# 连着好几条用户发言没有助手消息，模型不记得自己说过什么，每轮拿着几乎相同的
+# 上下文给出同一个答案。实测一段对话末尾连着四轮全是复读。
+# 修复见 filters.RememberInterrupted。
+name: interrupt_storm
+
+user: !include user_audio_zh.yaml
+judge: !include judge_zh.yaml
+
+turns:
+  - user: "用两句话讲讲杭州这座城市"
+    expect:
+      - event: response
+        eval: "介绍了杭州这座城市"
+
+  # 关键：在它开口之后 1.5 秒插话，这才叫打断。按绝对秒数排会落在它还没开口之前，
+  # 那不是打断，是自言自语——自造的那版测试就是这么把正常行为判成失败的。
+  - user: "停，那苏州呢"
+    send_after: { event: llm_started, delay_ms: 1500 }
+    expect:
+      - event: response
+        eval: "转而说苏州，没有继续讲杭州"
+
+  - user: "你刚才讲杭州说了什么"
+    send_after: { event: llm_started, delay_ms: 2000 }
+    expect:
+      - event: response
+        eval: "复述了刚才关于杭州的内容，没有说自己没讲过杭州；也没有把上一轮的话
+          一字不差地再念一遍"

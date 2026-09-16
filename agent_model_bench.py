@@ -33,21 +33,23 @@ GATEWAY = "https://openrouter.ai/api/v1"
 # 记在模型头上（实测一轮里 15 次有 6 次是这样，sonnet 的 compute 因此从 4/5 变 1/5）。
 BROKEN = ("API Error", "Can't reach", "<失败", "rate limit", "Connection")
 RETRY = int(os.getenv("EVAL_RETRY", "2"))
-MODELS = os.getenv(
-    "MODELS",
-    "z-ai/glm-4.6,anthropic/claude-haiku-4.5,anthropic/claude-sonnet-4.5",
+# 「后端:模型」。后端不同时不能只比模型——dsh 没有分步事件、没法按任务换工具集，
+# 这些差别不体现在准确率上，但会体现在步数和用户体验上。
+LINEUP = os.getenv(
+    "LINEUP",
+    "claude:z-ai/glm-4.6,claude:anthropic/claude-sonnet-4.5,dsh:deepseek/deepseek-v4-flash",
 ).split(",")
 REPEAT = int(os.getenv("REPEAT", "1"))
 
 # OpenRouter 价目（美元每百万 token），用来把 token 折成每问成本。
+# 只列国产开源的价目——Anthropic / Google / OpenAI 在当前 key 上是 403。
 PRICES = {
     "z-ai/glm-4.6": (0.50, 2.00, 0.10),
-    "anthropic/claude-haiku-4.5": (1.00, 5.00, 0.10),
-    "anthropic/claude-sonnet-4.5": (3.00, 15.00, 0.30),
-    "deepseek/deepseek-v4-flash": (0.14, 0.28, 0.028),
-    "openai/gpt-5.1": (1.25, 10.00, 0.125),
-    "moonshotai/kimi-k2-thinking": (0.60, 2.50, 0.15),
+    "deepseek/deepseek-v4-flash": (0.06, 0.11, 0.012),
+    "deepseek/deepseek-v4-pro": (0.53, 1.05, 0.106),
     "qwen/qwen3-max": (0.78, 3.90, 0.156),
+    "moonshotai/kimi-k2.5": (0.45, 2.25, 0.09),
+    "minimax/minimax-m2.7": (0.24, 0.96, 0.048),
 }
 
 # 只跑有判据的题——没有判据的题看不出高下，白花钱。
@@ -65,13 +67,17 @@ def cost(model: str, inp: int, cached: int, out: int) -> float:
     return (inp * p_in + cached * p_cache + out * p_out) / 1e6
 
 
-async def run_model(model: str) -> dict:
-    """一个模型跑完全部难题。"""
+async def run_model(spec: str) -> dict:
+    """一个「后端:模型」组合跑完全部难题。"""
+    backend_kind, _, model = spec.partition(":")
     os.environ["CLAUDE_AGENT_MODEL"] = model
+    os.environ["DSH_MODEL"] = model
     # **不能让 agent 看见考卷。**evalset.py 就在项目目录里，题目和答案都在
     # 里面——实测 glm 直接答「从 evalset.py 中的测试用例可以看出…」，那一题的
     # 分数毫无意义。所以 agent 跑在一份剔掉评测文件的副本上。
-    backend = backends.build("claude", client=None, model=model, root=sandbox_root())
+    backend = backends.build(
+        backend_kind, client=None, model=model, root=sandbox_root()
+    )
 
     hits = total = steps = broken = 0
     secs, spend = [], 0.0
@@ -96,7 +102,10 @@ async def run_model(model: str) -> dict:
             secs.append(time.time() - t)
             steps += c.steps
             u = backend.usage
-            spend += cost(model, u.input, u.cached, u.output)
+            # dsh 不吐 token 用量，成本没法算——报 0 并在结论里说明，
+            # 别让一个「便宜」的假象混进对比。
+            if u is not None:
+                spend += cost(model, u.input, u.cached, u.output)
             if any(b in answer for b in BROKEN):
                 broken += 1
                 print(f"    ~ [{case.kind:<8}] 测量失败，重试 {RETRY} 次仍不通，不计分")
@@ -116,7 +125,7 @@ async def run_model(model: str) -> dict:
             )
     n = len(HARD) * REPEAT
     return {
-        "model": model,
+        "model": spec,
         "acc": f"{hits}/{total}",
         "broken": broken,
         "per_kind": "  ".join(
@@ -132,17 +141,17 @@ async def main():
     os.environ.setdefault("CLAUDE_BASE_URL", GATEWAY)
     os.environ.setdefault("CLAUDE_AUTH_TOKEN", os.environ["OPENROUTER_API_KEY"])
 
-    print(f"\n框架固定为 Claude Agent SDK，只换模型。{len(HARD)} 道难题 × {REPEAT} 轮\n")
+    print(f"\n后端 × 模型对比。{len(HARD)} 道题 × {REPEAT} 轮\n")
     rows = []
-    for model in MODELS:
-        print(f"■ {model}")
-        rows.append(await run_model(model.strip()))
+    for spec in LINEUP:
+        print(f"■ {spec}")
+        rows.append(await run_model(spec.strip()))
         print()
 
-    print(f"{'模型':<30}{'答对':>7}{'耗时中位':>10}{'步数':>7}{'每问成本':>11}{'':>6}")
+    print(f"{'后端:模型':<44}{'答对':>7}{'耗时中位':>10}{'步数':>7}{'每问成本':>11}{'':>6}")
     for r in rows:
         print(
-            f"{r['model']:<30}{r['acc']:>7}{r['secs']:9.1f}s{r['steps']:7.1f}"
+            f"{r['model']:<44}{r['acc']:>7}{r['secs']:9.1f}s{r['steps']:7.1f}"
             f"  ${r['cost']:.4f}  无效{r['broken']:>2}   {r['per_kind']}"
         )
 

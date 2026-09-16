@@ -1,0 +1,23 @@
+# 算不出来不等于办不到，要派给后台。
+#
+# 当初怎么坏的：让它算第 7856 个斐波那契数，答「没有这个能力」。沙箱明明放行
+# python3、工具也在手边，卡点是 agent 的系统提示第一句写的是「你在回答关于一个
+# 代码项目的问题」，算数题不在这个框里，模型就凭脑子答了。
+# 修复见 tasks.py：按任务类型换提示、工具集和轮数预算。
+name: compute_dispatch
+
+user: !include user_audio_zh.yaml
+judge: !include judge_zh.yaml
+
+turns:
+  - user: "帮我算一下第三百个斐波那契数是多少"
+    expect:
+      - event: response
+        eval: "表示要去算或正在算，**没有**说自己没有计算能力、办不到"
+        within_ms: 30000
+
+  # 后台任务要几十秒，给足预算。
+  - expect:
+      - event: response
+        eval: "报出了一个很长的数字结果，或者说明了它的位数和开头结尾"
+        within_ms: 120000

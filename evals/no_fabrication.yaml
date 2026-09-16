@@ -1,0 +1,17 @@
+# 陷阱题：不存在的东西不许编。
+#
+# 当初怎么坏的：模型被问到不存在的东西时倾向于编一个像样的答案，而不是说没有。
+# 实测答过「这个项目支持三种数据库：PostgreSQL、Redis 和本地内存队列」——
+# 全是编的。这类失败最危险，因为答案听起来完全合理。
+name: no_fabrication
+
+user: !include user_audio_zh.yaml
+judge: !include judge_zh.yaml
+
+turns:
+  - user: "这个项目连的是哪个数据库"
+    expect:
+      - event: response
+        eval: "说这个项目不连数据库、或者没有用数据库。**不能**报出任何具体的
+          数据库产品名（比如 PostgreSQL、MySQL、Redis、MongoDB）当作它在用的"
+        within_ms: 120000

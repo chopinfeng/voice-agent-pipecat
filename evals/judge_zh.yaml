@@ -1,0 +1,15 @@
+# 判定用什么。所有场景共用。
+#
+# modality 用 audio：让 bot 真的合成出声，再把**它实际念出来的音频**转写回来判。
+# 这是唯一能抓到「内部标注被念出来」这类问题的方式——那种 bug 在 LLM 文本里看不见，
+# 只有听它嘴里说出什么才知道（这个项目里发生过三次）。
+#
+# 判定模型走 DeepSeek 官方：默认的 ollama 本机没装；OpenAI 直连在当前网络下是 403。
+# 靠 OPENAI_API_KEY / OPENAI_BASE_URL 两个环境变量指过去，见 evals/run.sh。
+modality: audio
+eval:
+  service: openai
+  model: deepseek-v4-flash
+transcription:
+  service: whisper
+  language: zh
