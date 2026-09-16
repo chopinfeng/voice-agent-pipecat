@@ -20,6 +20,7 @@ worker 那一层管的是调度、进度播报和取消，跟「谁来跑这个�
 
 import asyncio
 import contextlib
+import functools
 import json
 import os
 from collections.abc import Awaitable, Callable
@@ -111,6 +112,9 @@ def _describe(name: str, args: dict) -> str:
         "Glob": lambda: f"在找 {args.get('pattern', '')[:30]}",
         "WebSearch": lambda: f"在搜 {args.get('query', '')[:30]}",
         "WebFetch": lambda: f"在看 {args.get('url', '')[:40]}",
+        "write_file": lambda: f"在写 {Path(args.get('path', '')).name}",
+        "Edit": lambda: f"在改 {Path(args.get('file_path', '')).name}",
+        "Write": lambda: f"在写 {Path(args.get('file_path', '')).name}",
     }.get(name, lambda: f"在跑 {name}")()
 
 
@@ -182,26 +186,39 @@ class ToolLoopBackend:
                 except json.JSONDecodeError:
                     args = {}
                 await on_step(turn + 1, _describe(name, args), _reads_file(name, args))
-                result = await self._call_tool(name, args)
+                result = await self._call_tool(name, args, task)
                 messages.append(
                     {"role": "tool", "tool_call_id": call.id, "content": result}
                 )
         return GAVE_UP
 
-    async def _call_tool(self, name: str, args: dict) -> str:
+    async def _call_tool(self, name: str, args: dict, task: tasks.Kind) -> str:
         """执行一次工具调用。
 
         任何异常都转成给模型看的文字，绝不往外抛——工具报错是它该自己处理的信息，
         炸掉循环等于整个任务白跑。
+
+        Args:
+            name: 工具名。
+            args: 工具参数。
+            task: 当前任务类型——只有 ``dev`` 才放行 ``write_file`` 和跑测试用的
+                额外命令，跟 ``run()`` 里按 ``task.builtin_tools`` 过滤工具表是
+                同一道门，这里是第二道：模型编个 ``write_file`` 调用糊弄过去也
+                没用，写不写还是看 ``task``。
         """
         try:
             if name == "bash":
                 # 工作目录锁在项目根，命令本身还要过 tools 里的只读白名单。
-                return await T.run_bash(args["command"], self._root)
+                extra = T.DEV_EXTRA_CMDS if task.name == "dev" else frozenset()
+                return await T.run_bash(args["command"], self._root, extra)
             if name == "browse":
                 return await T.browse(args["url"])
             if name == "search":
                 return await T.web_search(args["query"], self._client, self._model)
+            if name == "write_file":
+                if task.name != "dev":
+                    return "没写：这个工具只在 kind=dev 时才能用"
+                return await T.write_file(args["path"], args["content"], self._root)
             return f"未知工具: {name}"
         except Exception as e:  # noqa: BLE001 - 工具报错要回给模型，不能炸掉循环
             return f"工具执行失败: {e}"
@@ -345,14 +362,30 @@ class ClaudeBackend:
 
         三样东西跟着类型走：提示的第一句（决定它往哪使劲）、工具集（给不该用的工具
         只会诱导它走弯路）、轮数预算（算一道题两三轮够，翻代码要十几轮）。
+
+        ``Edit``/``Write`` 只在 ``task.tools`` 里带了它们时才会出现（目前只有
+        ``dev``），但钩子表是**固定挂上去的**，不看 ``task.tools``——``allowed_tools``
+        没给的工具本来就调不到，这里多挂一道钩子不产生额外限制，图的是让钩子表本身
+        跟具体是哪个 kind 无关，不用在这里对着 kind 做条件判断。
         """
         task = tasks.pick(kind)
+        # 只在 kind=dev 下放行跑测试用的额外命令（pytest），其余 kind 的 Bash
+        # 仍然只有只读白名单那一批。用 partial 绑定而不是在 _check_bash 里判断
+        # kind，是因为 PreToolUse 钩子的调用签名是固定的三个参数，塞不下 kind。
+        extra_cmds = T.DEV_EXTRA_CMDS if task.name == "dev" else frozenset()
         hooks = {
             "PreToolUse": [
-                self._hook_matcher(matcher="Bash", hooks=[self._check_bash]),
+                self._hook_matcher(
+                    matcher="Bash",
+                    hooks=[functools.partial(self._check_bash, extra_cmds=extra_cmds)],
+                ),
                 *(
                     self._hook_matcher(matcher=name, hooks=[self._check_path])
                     for name in ("Read", "Glob", "Grep")
+                ),
+                *(
+                    self._hook_matcher(matcher=name, hooks=[self._check_write_path])
+                    for name in ("Edit", "Write")
                 ),
             ]
         }
@@ -366,10 +399,17 @@ class ClaudeBackend:
             env=self._env,
         )
 
-    async def _check_bash(self, data: dict, tool_use_id, context) -> dict:
-        """每条 Bash 命令过一遍只读白名单，不合规就拒掉。"""
+    async def _check_bash(
+        self, data: dict, tool_use_id, context, *, extra_cmds: frozenset[str] = frozenset()
+    ) -> dict:
+        """每条 Bash 命令过一遍只读白名单，不合规就拒掉。
+
+        ``extra_cmds`` 只放宽命令名白名单（比如 ``pytest``），不影响
+        ``_check_command`` 内部对输出重定向的拦截——落盘永远只能走 Edit/Write，
+        这条规则不跟着 kind 变。
+        """
         command = (data.get("tool_input") or {}).get("command", "")
-        return self._deny(T._check_command(command, self._root), command)
+        return self._deny(T._check_command(command, self._root, extra_cmds), command)
 
     async def _check_path(self, data: dict, tool_use_id, context) -> dict:
         """Read/Glob/Grep 的目标路径不能跑出项目目录。"""
@@ -380,6 +420,18 @@ class ClaudeBackend:
         if T._inside(target, self._root):
             return {}
         return self._deny("路径不能跑出项目目录", target)
+
+    async def _check_write_path(self, data: dict, tool_use_id, context) -> dict:
+        """Edit/Write 的目标：在 ``_check_path`` 的基础上再挡 .git 和 .env。
+
+        走 ``T._check_write_target``——跟内建后端的 ``write_file`` 共用同一份
+        判断，两个后端对「能不能写这个文件」的答案不该因为走的是哪条路而不同。
+        """
+        args = data.get("tool_input") or {}
+        target = args.get("file_path") or args.get("path") or ""
+        if not target:
+            return {}
+        return self._deny(T._check_write_target(target, self._root), target)
 
     def _deny(self, reason: str | None, what: str) -> dict:
         """把拒绝理由包成 PreToolUse 钩子的输出格式。"""

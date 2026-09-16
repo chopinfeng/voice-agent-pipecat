@@ -139,6 +139,9 @@ AGENT_NAME = "project-agent"
 PROGRESS_MIN_GAP = float(os.getenv("PROGRESS_MIN_GAP", "12"))
 # 联网查询的超时。搜索本身要花时间，给得比普通调用宽。
 WEB_TIMEOUT = float(os.getenv("WEB_TIMEOUT", "35"))
+# 设 DIRECT_DELIVER=1 切回「结果绕过模型直接念」的旧路径。见 _deliver 的说明——
+# 留着是为了能在同一场手测里 A/B，不是为了长期两条路都养着。
+DIRECT_DELIVER = os.getenv("DIRECT_DELIVER", "0") != "0"
 
 SYSTEM_INSTRUCTION = (
     # 不写这段，用户闲聊时问起"你是本地还是云端的"，模型会张口就来说自己跑在云上、
@@ -158,6 +161,11 @@ SYSTEM_INSTRUCTION = (
     "它手里有 shell 能跑 python，你算不出来不等于办不到，不许直接说自己没这个能力。"
     "**以及这个项目里某个功能到底是怎么实现的（哪怕问的是你自己的某个能力，"
     "比如填充语、延迟优化、听写怎么做的），也要去看代码，不许凭常识编**。"
+    # dev 是唯一会真的改文件的类型，且只有用户明确要求改代码时才用——听写一旦
+    # 听岔，「查一下」和「改一下」是完全不同的两件事，不能靠猜。
+    "用户明确要求**改代码、写代码、修复某个问题、加个功能、跑测试**这类要动手改的"
+    "事，才把 kind 定为 dev；只是问问题、查资料、想了解某个功能怎么实现的，用"
+    "codebase 或 general，**不要因为话题跟代码有关就顺手定成 dev**。"
     "后台有一个 agent 会去翻文件，它可能要跑几十秒。它返回结果后，用口语把要点讲给用户。"
     "任务跑的过程中用户可以照常聊别的，你正常回答就行。"
     "如果后台已经有任务在跑，用户又问起它的进展（比如「查得怎么样」「好了吗」「还要多久」），"
@@ -241,23 +249,38 @@ async def search_web(params: FunctionCallParams, query: str):
 
 
 async def _deliver(params: FunctionCallParams, job_id: str, answer: str) -> None:
-    """把办完的结果送到用户耳朵里，再告诉模型一声。
+    """把办完的结果交给模型，由它讲给用户。
 
-    **这是这个系统里最容易搞反的一件事。**默认写法是把结果交给 ``result_callback``，
-    让模型自己念出来——但那需要**再跑一轮 LLM**，而 ``cancel_on_interruption=False``
-    只保住函数本身不被取消，保不住后面那一轮。用户在等待期间随口说一句就是一次打断，
-    那一轮被取消，几十秒的工作成果就此消失。实测一段对话里七次联网查询有四次这么丢的，
-    用户只能反复问同一个问题。
+    **这里之前的诊断是错的，值得记一笔。**原先写的是「用户在等待期间随口说一句就是
+    一次打断，那一轮被取消，几十秒的工作成果就此消失」，据此绕过 ``result_callback``
+    直接推 ``TTSSpeakFrame``。对着 pipecat 源码核过之后，实际行为是：
 
-    所以反过来：**结果直接说出口**（``TTSSpeakFrame`` 不依赖任何一轮 LLM 存活），
-    给模型的那份只是一条「已经念过了」的记录，防止它再复述一遍。工具结果的职责是
-    通知模型，不是送达用户。
+    * 结果**不会丢**。``_handle_function_call_finished`` 无条件把它作为一条
+      developer 消息写进上下文（``async_tool_messages`` 那套异步工具协议），
+      取消也走同一条路。
+    * 丢的只是**主动出声的那一次推理**：
+      ``if run_llm and not self._user_speaking`` —— 结果落地时用户恰好在说话，
+      那一轮就不跑，结果躺在上下文里等下一次自然轮次。
+
+    而 bot 在说话时上游是留了补跑标记的（``_push_context_on_bot_stopped_speaking``），
+    用户在说话时没留。这个不对称由 ``filters.RememberInterrupted`` 补上了，所以现在
+    走正路就行：结果交给模型，它用自己的口吻讲出来。
+
+    这么改不只是少一处 hack。直接 TTS 那条路上，agent 的原文是**没经过对话模型润色**
+    的，跟系统提示里「一到两句话、第一句尽量短」那些约束对不上；而且还要额外塞一条
+    「已经念过了别复述」的假消息去堵模型的嘴，那条消息本身也在污染上下文。
+
+    代价是多一轮 LLM（约 1.5 秒）才出声。所以旧路径留在 ``DIRECT_DELIVER=1`` 后面，
+    同一场手测里可以来回切着听哪个好。
     """
     logger.info(f"投递结果（{job_id}）：{answer[:40]}")
-    await params.llm.queue_frame(TTSSpeakFrame(answer))
-    await params.result_callback(
-        f"[系统已经把这个结果念给用户了，不要复述：{answer[:120]}]"
-    )
+    if DIRECT_DELIVER:
+        await params.llm.queue_frame(TTSSpeakFrame(answer))
+        await params.result_callback(
+            f"[系统已经把这个结果念给用户了，不要复述：{answer[:120]}]"
+        )
+        return
+    await params.result_callback(answer)
 
 
 async def _web_query(model: str, query: str) -> str:
@@ -328,7 +351,7 @@ async def ask_project(params: FunctionCallParams, question: str, kind: str = "ge
 
     Args:
         question (str): 要查或要算的问题，写成完整的一句话。
-        kind (str): 任务类型，决定后台用哪套提示和工具。可选：compute=要算的：大数、数列、统计、进制转换、日期推算；codebase=要查本地代码的：某个功能怎么实现的、文件在哪、依赖有哪些；research=要联网深入查的：需要看几个来源、比对之后才能回答；general=说不清属于哪类，或者要几种活一起干。
+        kind (str): 任务类型，决定后台用哪套提示和工具。可选：compute=要算的：大数、数列、统计、进制转换、日期推算；codebase=要查本地代码的：某个功能怎么实现的、文件在哪、依赖有哪些；research=要联网深入查的：需要看几个来源、比对之后才能回答；dev=要动手改的：写代码、改已有文件、跑测试，只有明确要求改代码才用这个；general=说不清属于哪类，或者要几种活一起干。
     """
     await _dispatch(params, question, kind)
 
@@ -342,7 +365,7 @@ async def ask_another(params: FunctionCallParams, question: str, kind: str = "ge
 
     Args:
         question (str): 新的、和在跑的那个不同的问题。
-        kind (str): 任务类型，可选：compute=要算的：大数、数列、统计、进制转换、日期推算；codebase=要查本地代码的：某个功能怎么实现的、文件在哪、依赖有哪些；research=要联网深入查的：需要看几个来源、比对之后才能回答；general=说不清属于哪类，或者要几种活一起干。
+        kind (str): 任务类型，可选：compute=要算的：大数、数列、统计、进制转换、日期推算；codebase=要查本地代码的：某个功能怎么实现的、文件在哪、依赖有哪些；research=要联网深入查的：需要看几个来源、比对之后才能回答；dev=要动手改的：写代码、改已有文件、跑测试，只有明确要求改代码才用这个；general=说不清属于哪类，或者要几种活一起干。
     """
     await _dispatch(params, question, kind)
 
@@ -426,6 +449,31 @@ async def _dispatch(params: FunctionCallParams, question: str, kind: str = "gene
         await _deliver(params, job_id, answer)
 
 
+async def _sync_memory(params: FunctionCallParams) -> None:
+    """把存档里的记忆重新灌进上下文。
+
+    系统提示是**建 LLM service 时拼一次**的（``run_bot`` 里的 ``memory.as_prompt()``），
+    所以会话中途新记的事根本不在系统提示里——它只活在这一轮工具调用留下的历史里。
+
+    而 ``memory.py`` 开头那段自己的论证正是「历史会被打断取消、被合并改写、被上下文
+    长度挤掉，把长期事实放在那儿等于没放」。这个项目里 ``CollapseUserTurns`` 和打断
+    收尾都会动那段历史。靠历史带记忆跟那段论证是自相矛盾的，重启后能记得、这一场
+    反而可能记不住。
+
+    所以每次增删之后补一条 developer 消息。``run_llm=False``：这只是把事实摆进去，
+    该跟用户说什么由 ``result_callback`` 那一轮负责。
+
+    同一场会话里多次增删会留下多条，最新的在最后。记忆增删是低频动作，先不做去重。
+    """
+    block = memory.as_prompt() or "（用户目前没有让你长期记住的事。）"
+    await params.llm.queue_frame(
+        LLMMessagesAppendFrame(
+            messages=[{"role": "developer", "content": f"[长期记忆·最新] {block}"}],
+            run_llm=False,
+        )
+    )
+
+
 @tool_options(cancel_on_interruption=False)
 async def remember_this(params: FunctionCallParams, topic: str, content: str):
     """把用户交代的、以后还该记得的事存下来，跨会话有效。
@@ -438,7 +486,9 @@ async def remember_this(params: FunctionCallParams, topic: str, content: str):
             覆盖旧的，用户改主意时不会留下两条打架的记录。
         content (str): 要记的事，一句话。
     """
-    await params.result_callback(memory.remember(topic, content))
+    said = memory.remember(topic, content)
+    await _sync_memory(params)
+    await params.result_callback(said)
 
 
 @tool_options(cancel_on_interruption=False)
@@ -448,7 +498,9 @@ async def forget_this(params: FunctionCallParams, topic: str):
     Args:
         topic (str): 要忘掉的那类事，比如「住址」。
     """
-    await params.result_callback(memory.forget(topic))
+    said = memory.forget(topic)
+    await _sync_memory(params)
+    await params.result_callback(said)
 
 
 @tool_options(cancel_on_interruption=False)
